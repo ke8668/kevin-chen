@@ -560,18 +560,37 @@
     <hr class="divider-line">
 
     <div class="field-group">
-      <label class="field-label"><span class="step-tag">3</span>上傳雙語字幕檔</label>
-      <div class="file-drop" id="fileDrop">
-        <input type="file" id="subtitleFileInput" accept=".srt,.vtt,.json">
-        <p class="file-drop-label"><strong>點擊選擇檔案</strong>或拖放到這裡</p>
-        <p class="field-hint">支援 .srt / .vtt（單語，會放在「原文」欄）／ .json（雙語，格式如下）</p>
+      <label class="field-label"><span class="step-tag">3</span>取得雙語字幕</label>
+      <div class="view-toggle" id="subtitleSourceToggle" role="group" aria-label="字幕來源" style="margin-bottom:14px;">
+        <button class="active" data-subtitle-mode="upload">手動上傳檔案</button>
+        <button data-subtitle-mode="youtube">自動抓 YouTube 字幕</button>
       </div>
-      <div id="fileNameChipWrap"></div>
-      <p class="field-hint">
-        JSON 格式範例：<br>
-        <code>[{"t": 0, "en": "Hello world", "zh": "哈囉世界"}, ...]</code><br>
-        t 為該句開始時間（秒）。也可以先不上傳，直接用下方示範字幕試玩互動效果。
-      </p>
+
+      <!-- 手動上傳 -->
+      <div id="uploadModePanel">
+        <div class="file-drop" id="fileDrop">
+          <input type="file" id="subtitleFileInput" accept=".srt,.vtt,.json">
+          <p class="file-drop-label"><strong>點擊選擇檔案</strong>或拖放到這裡</p>
+          <p class="field-hint">支援 .srt / .vtt（單語，會放在「原文」欄）／ .json（雙語，格式如下）</p>
+        </div>
+        <div id="fileNameChipWrap"></div>
+        <p class="field-hint">
+          JSON 格式範例：<br>
+          <code>[{"t": 0, "en": "Hello world", "zh": "哈囉世界"}, ...]</code><br>
+          t 為該句開始時間（秒）。也可以先不上傳，直接用下方示範字幕試玩互動效果。
+        </p>
+      </div>
+
+      <!-- YouTube 自動抓取 -->
+      <div id="youtubeModePanel" class="hidden">
+        <input type="text" id="youtubeUrlInput" class="text-input" placeholder="貼上這集對應的 YouTube 影片連結，例如 https://www.youtube.com/watch?v=xxxxxxxxxxx">
+        <p class="field-hint" style="margin-bottom:12px;">
+          會抓取該影片的英文字幕（人工或自動生成皆可），並嘗試用免費翻譯服務自動翻成中文。
+          這個翻譯是非官方、免費的服務，<strong>不保證每句都翻譯成功</strong>，翻譯失敗的句子會保留英文、中文留空，你可以之後手動補。
+        </p>
+        <button class="ghost-btn" id="fetchYoutubeBtn">抓取並翻譯字幕</button>
+        <div class="status-box" id="youtubeStatus"></div>
+      </div>
     </div>
 
     <button class="ghost-btn" id="startDemoBtn">先不上傳，用示範字幕試玩看看</button>
@@ -623,7 +642,7 @@
           </button>
           <button class="speed-btn" id="speedBtn">1.0×</button>
         </div>
-        <div class="view-toggle" role="group" aria-label="字幕顯示模式">
+        <div class="view-toggle" id="displayModeToggle" role="group" aria-label="字幕顯示模式">
           <button class="active" data-mode="both">雙語</button>
           <button data-mode="en">原文</button>
           <button data-mode="zh">翻譯</button>
@@ -718,7 +737,7 @@ const curTimeEl = document.getElementById('curTime');
 const durTimeEl = document.getElementById('durTime');
 const transcript = document.getElementById('transcript');
 const transcriptHint = document.getElementById('transcriptHint');
-const viewToggle = document.querySelector('.view-toggle');
+const viewToggle = document.getElementById('displayModeToggle');
 const episodeEyebrowText = document.getElementById('episodeEyebrowText');
 const episodeTitleText = document.getElementById('episodeTitleText');
 const episodeShowText = document.getElementById('episodeShowText');
@@ -918,6 +937,88 @@ subtitleFileInput.addEventListener('change', async () => {
 });
 fileDrop.addEventListener('click', (e) => {
   if (e.target.tagName !== 'INPUT') subtitleFileInput.click();
+});
+
+// =================================================================
+// 4b. Subtitle source tab switch (manual upload vs YouTube auto-fetch)
+// =================================================================
+const subtitleSourceToggle = document.getElementById('subtitleSourceToggle');
+const uploadModePanel = document.getElementById('uploadModePanel');
+const youtubeModePanel = document.getElementById('youtubeModePanel');
+const youtubeUrlInput = document.getElementById('youtubeUrlInput');
+const fetchYoutubeBtn = document.getElementById('fetchYoutubeBtn');
+const youtubeStatus = document.getElementById('youtubeStatus');
+
+if (subtitleSourceToggle){
+  subtitleSourceToggle.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-subtitle-mode]');
+    if (!btn) return;
+    subtitleSourceToggle.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const mode = btn.dataset.subtitleMode;
+    uploadModePanel.classList.toggle('hidden', mode !== 'upload');
+    youtubeModePanel.classList.toggle('hidden', mode !== 'youtube');
+
+    // 切換來源時清掉另一邊殘留的結果，避免按鈕/狀態跟實際資料不一致
+    uploadedLines = null;
+    enterPlayerBtn.classList.add('hidden');
+    fileNameChipWrap.innerHTML = '';
+    youtubeStatus.className = 'status-box';
+    youtubeStatus.textContent = '';
+  });
+}
+
+function showYoutubeStatus(message, type){
+  youtubeStatus.textContent = message;
+  youtubeStatus.className = `status-box show ${type}`;
+}
+
+fetchYoutubeBtn?.addEventListener('click', async () => {
+  const backendUrl = backendUrlInput.value.trim().replace(/\/$/, '');
+  const ytUrl = youtubeUrlInput.value.trim();
+
+  // 每次重新抓取前先清掉上一次的結果，避免「上一次成功、這次失敗」
+  // 卻誤留著舊的「進入播放器」按鈕跟舊資料。
+  uploadedLines = null;
+  enterPlayerBtn.classList.add('hidden');
+  fileNameChipWrap.innerHTML = '';
+
+  if (!backendUrl){
+    showYoutubeStatus('請先在上面填入後端 API 網址。', 'error');
+    return;
+  }
+  if (!ytUrl){
+    showYoutubeStatus('請貼上 YouTube 影片連結。', 'error');
+    return;
+  }
+
+  fetchYoutubeBtn.disabled = true;
+  showYoutubeStatus('正在抓取字幕並翻譯中…（句數多時可能要等 30 秒以上，免費翻譯服務逐句呼叫，請耐心等候）', 'loading');
+
+  try{
+    const apiUrl = `${backendUrl}/api/transcript/youtube?video=${encodeURIComponent(ytUrl)}&translate=true`;
+    const resp = await fetch(apiUrl);
+    const data = await resp.json();
+
+    if (!resp.ok){
+      showYoutubeStatus(`抓取失敗：${data.detail || '未知錯誤'}`, 'error');
+      return;
+    }
+
+    uploadedLines = data.lines.map(l => ({ t: l.t, en: l.en, zh: l.zh || '' }));
+    const translatedCount = uploadedLines.filter(l => l.zh).length;
+    let msg = `成功抓到 ${uploadedLines.length} 句字幕，其中 ${translatedCount} 句已翻譯成中文。`;
+    if (data.translation_warning){
+      msg += ` 注意：${data.translation_warning}`;
+    }
+    showYoutubeStatus(msg, data.translation_warning ? 'info' : 'info');
+    fileNameChipWrap.innerHTML = `<span class="file-name-chip">🎬 YouTube 字幕 · ${uploadedLines.length} 句</span>`;
+    enterPlayerBtn.classList.remove('hidden');
+  } catch(err){
+    showYoutubeStatus(`連不到後端（${err.message}）。請確認後端網址正確、伺服器正在執行。`, 'error');
+  } finally {
+    fetchYoutubeBtn.disabled = false;
+  }
 });
 
 // =================================================================
