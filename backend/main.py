@@ -30,6 +30,13 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from transcript_sources import (
+    fetch_youtube_transcript,
+    translate_lines_to_zh,
+    fetch_substack_transcript,
+    TranscriptSourceError,
+)
+
 app = FastAPI(title="Bilingo Podcast Backend", version="0.1.0")
 
 # 開發階段先全部放開；之後部署時應改成你前端的實際網域
@@ -318,3 +325,74 @@ async def find_episode_by_title(
                 return {"podcast_title": podcast_title, "episode": ep.model_dump()}
 
     raise HTTPException(status_code=404, detail="在這個節目的 RSS Feed 裡找不到標題符合的單集")
+
+
+# --------------------------------------------------------------------------
+# 自動逐字稿來源：YouTube 字幕 + 免費翻譯
+# --------------------------------------------------------------------------
+
+class TranscriptLineOut(BaseModel):
+    t: float
+    en: str
+    zh: str = ""
+
+
+class TranscriptOut(BaseModel):
+    source: str
+    lines: List[TranscriptLineOut]
+    translation_warning: Optional[str] = None
+
+
+@app.get("/api/transcript/youtube", response_model=TranscriptOut)
+async def get_youtube_transcript(
+    video: str = Query(..., description="YouTube 影片連結或 11 字元的影片 ID"),
+    translate: bool = Query(True, description="是否同時翻譯成中文（用免費、非官方的翻譯服務）"),
+):
+    """
+    抓取 YouTube 影片的英文字幕，並（可選）翻譯成中文。
+
+    限制：
+      - 需要該影片本身有字幕（人工上傳或自動生成皆可）
+      - 翻譯使用免費、非官方的 googletrans，不保證 100% 成功率；
+        若翻譯失敗，該句的 zh 會是空字串，不會讓整個請求失敗
+    """
+    try:
+        lines = fetch_youtube_transcript(video)
+    except TranscriptSourceError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    translation_warning = None
+    if translate:
+        try:
+            lines = await translate_lines_to_zh(lines)
+            if any(not l.zh for l in lines):
+                translation_warning = (
+                    "部分句子翻譯失敗（免費翻譯服務不穩定），"
+                    "這些句子目前只有英文，可以之後再手動補上中文。"
+                )
+        except TranscriptSourceError as e:
+            translation_warning = f"翻譯整體失敗，僅回傳英文字幕：{e}"
+
+    return TranscriptOut(
+        source="youtube",
+        lines=[TranscriptLineOut(**l.to_dict()) for l in lines],
+        translation_warning=translation_warning,
+    )
+
+
+# --------------------------------------------------------------------------
+# 自動逐字稿來源：Substack（預留，尚未實作）
+# --------------------------------------------------------------------------
+
+@app.get("/api/transcript/substack")
+async def get_substack_transcript(
+    article_url: str = Query(..., description="Substack newsletter 文章網址"),
+):
+    """
+    預留 endpoint：之後若要支援 Substack 的 Transcript 區塊自動解析。
+    目前一律回傳 501，明確告知前端「尚未實作」，而不是默默回空結果。
+    """
+    try:
+        fetch_substack_transcript(article_url)
+    except TranscriptSourceError as e:
+        raise HTTPException(status_code=501, detail=str(e))
